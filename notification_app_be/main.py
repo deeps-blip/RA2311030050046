@@ -65,6 +65,46 @@ async def list_notifications(
 
     return {"notifications": notifications}
 
+# STAGE 1: GET /api/notifications/unread-count
+@app.get("/api/notifications/unread-count", response_model=UnreadCountResponse)
+async def unread_count(
+    db: AsyncSession = Depends(get_db),
+    student_id: int = Depends(get_current_student_id)
+):
+    count = await crud.get_unread_count(db, student_id)
+    return {"unread_count": count}
+
+# STAGE 6: Priority Scoring
+@app.get("/api/notifications/priority", response_model=NotificationListResponse)
+async def list_priority_notifications(
+    db: AsyncSession = Depends(get_db),
+    student_id: int = Depends(get_current_student_id),
+    top_n: int = Query(10, ge=1)
+):
+    # This would ideally be a complex SQL query with score calculation
+    # For now, let's fetch unread and score them in Python
+    result = await db.execute(
+        select(Notification)
+        .where(Notification.student_id == student_id, Notification.is_read == False)
+    )
+    unread = result.scalars().all()
+    
+    def calculate_score(n):
+        weights = {"Placement": 3, "Result": 2, "Event": 1}
+        type_weight = weights.get(n.type, 0)
+        
+        now = datetime.now(timezone.utc)
+        created_at = n.created_at
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+            
+        age_hours = (now - created_at).total_seconds() / 3600
+        # priorityScore = typeWeight + 0.5^(ageInHours / 24)
+        return type_weight + (0.5 ** (age_hours / 24))
+
+    sorted_notifications = sorted(unread, key=calculate_score, reverse=True)
+    return {"notifications": sorted_notifications[:top_n]}
+
 # STAGE 1: GET /api/notifications/:id
 @app.get("/api/notifications/{notification_id}", response_model=NotificationResponse)
 async def get_notification(
@@ -102,15 +142,6 @@ async def mark_all_read(
     await redis_client.delete(f"notifications:{student_id}:*")
     return {"message": "All marked as read", "updated_count": count}
 
-# STAGE 1: GET /api/notifications/unread-count
-@app.get("/api/notifications/unread-count", response_model=UnreadCountResponse)
-async def unread_count(
-    db: AsyncSession = Depends(get_db),
-    student_id: int = Depends(get_current_student_id)
-):
-    count = await crud.get_unread_count(db, student_id)
-    return {"unread_count": count}
-
 # STAGE 1: DELETE /api/notifications/:id
 @app.delete("/api/notifications/{notification_id}", response_model=MessageResponse)
 async def delete_notification(
@@ -143,34 +174,3 @@ async def notify_student(
     background_tasks.add_task(send_external_notification, notification.student_id, notification.message)
     
     return db_notification
-
-# STAGE 6: Priority Scoring
-@app.get("/api/notifications/priority", response_model=NotificationListResponse)
-async def list_priority_notifications(
-    db: AsyncSession = Depends(get_db),
-    student_id: int = Depends(get_current_student_id),
-    top_n: int = Query(10, ge=1)
-):
-    # This would ideally be a complex SQL query with score calculation
-    # For now, let's fetch unread and score them in Python
-    result = await db.execute(
-        select(Notification)
-        .where(Notification.student_id == student_id, Notification.is_read == False)
-    )
-    unread = result.scalars().all()
-    
-    def calculate_score(n):
-        weights = {"Placement": 3, "Result": 2, "Event": 1}
-        type_weight = weights.get(n.type, 0)
-        
-        now = datetime.now(timezone.utc)
-        created_at = n.created_at
-        if created_at.tzinfo is None:
-            created_at = created_at.replace(tzinfo=timezone.utc)
-            
-        age_hours = (now - created_at).total_seconds() / 3600
-        # priorityScore = typeWeight + 0.5^(ageInHours / 24)
-        return type_weight + (0.5 ** (age_hours / 24))
-
-    sorted_notifications = sorted(unread, key=calculate_score, reverse=True)
-    return {"notifications": sorted_notifications[:top_n]}
