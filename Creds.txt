@@ -1,0 +1,2 @@
+"clientID": "578635d4-c8d1-408d-9810-9c6ee918d77f",
+"clientSecret": "RVZyqjAptXcrbtkx"
