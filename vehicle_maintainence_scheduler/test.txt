@@ -1,14 +1,14 @@
-# Vehicle Maintenance Scheduler API Tests
+Vehicle Maintenance Scheduler API Tests
 
-## 1. Create a Mechanic Depot
+1. Create a Mechanic Depot
 curl -X POST "http://localhost:8000/api/v1/depots" \
      -H "Content-Type: application/json" \
      -d '{"id": "DEPOT-001", "mechanic_hours": 10}'
 
-## 2. Get All Depots
+2. Get All Depots
 curl -X GET "http://localhost:8000/api/v1/depots"
 
-## 3. Create Vehicle Tasks
+3. Create Vehicle Tasks
 curl -X POST "http://localhost:8000/api/v1/tasks" \
      -H "Content-Type: application/json" \
      -d '{"taskID": "V-101", "Impact": 50, "duration": 4}'
@@ -21,8 +21,8 @@ curl -X POST "http://localhost:8000/api/v1/tasks" \
      -H "Content-Type: application/json" \
      -d '{"taskID": "V-103", "Impact": 40, "duration": 5}'
 
-## 4. Get All Tasks
+4. Get All Tasks
 curl -X GET "http://localhost:8000/api/v1/tasks"
 
-## 5. Generate Optimal Schedule for Depot
+5. Generate Optimal Schedule for Depot
 curl -X POST "http://localhost:8000/api/v1/schedule/DEPOT-001"
