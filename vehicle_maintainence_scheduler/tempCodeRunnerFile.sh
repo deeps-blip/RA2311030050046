@@ -1,0 +1,1 @@
+{"id": "DEPOT-001", "mechanic_hours": 10}
