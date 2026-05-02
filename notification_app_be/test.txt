@@ -1,0 +1,342 @@
+# Notification System Design
+
+---
+
+# Stage 1
+
+Students need to see notifications when they log in — Placements, Events, Results.
+
+Here are the APIs the frontend needs:
+
+**Headers for all requests:**
+```
+Authorization: Bearer <token>
+Content-Type: application/json
+```
+
+---
+
+**GET /api/notifications** — get all notifications
+
+Response:
+```json
+{
+  "notifications": [
+    {
+      "id": "d146095a-0d86-4a34-9e69-3900a14576bc",
+      "type": "Placement",
+      "message": "TCS hiring for 2025 batch",
+      "isRead": false,
+      "createdAt": "2026-04-22T17:51:30Z"
+    }
+  ]
+}
+```
+
+---
+
+**GET /api/notifications/:id** — get one notification
+
+Response:
+```json
+{
+  "id": "d146095a-0d86-4a34-9e69-3900a14576bc",
+  "type": "Placement",
+  "message": "TCS hiring for 2025 batch",
+  "isRead": false,
+  "createdAt": "2026-04-22T17:51:30Z"
+}
+```
+
+---
+
+**PATCH /api/notifications/:id/read** — mark one as read
+
+Response:
+```json
+{ "id": "d146095a-...", "isRead": true }
+```
+
+---
+
+**PATCH /api/notifications/read-all** — mark all as read
+
+Response:
+```json
+{ "message": "All marked as read", "updatedCount": 5 }
+```
+
+---
+
+**GET /api/notifications/unread-count** — for the bell badge
+
+Response:
+```json
+{ "unreadCount": 3 }
+```
+
+---
+
+**DELETE /api/notifications/:id** — delete a notification
+
+Response:
+```json
+{ "message": "Deleted" }
+```
+
+---
+
+## Real-time notifications
+
+Using WebSockets (Socket.IO). When a student logs in, a socket connection opens. Server pushes new notifications directly — no polling needed.
+
+```
+ws://api/socket?token=<token>
+```
+
+Server emits `new_notification` event:
+```json
+{
+  "id": "abc-123",
+  "type": "Event",
+  "message": "Tech Fest registrations open",
+  "isRead": false,
+  "createdAt": "2026-04-22T09:00:00Z"
+}
+```
+
+Frontend listens:
+```javascript
+socket.on("new_notification", (data) => {
+  // update bell count and list
+});
+```
+
+---
+
+# Stage 2
+
+## DB choice: PostgreSQL
+
+The data is relational and structured — students have notifications with fixed fields. PostgreSQL fits naturally and gives good indexing support for when data grows.
+
+## Schema
+
+```sql
+CREATE TABLE students (
+  id         SERIAL PRIMARY KEY,
+  name       VARCHAR(100) NOT NULL,
+  email      VARCHAR(150) UNIQUE NOT NULL,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE notifications (
+  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  student_id INT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  type       VARCHAR(20) CHECK (type IN ('Placement', 'Event', 'Result')),
+  message    TEXT NOT NULL,
+  is_read    BOOLEAN DEFAULT FALSE,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+## Problems as data grows
+
+- No indexes → full table scan on every query (5M rows)
+- SELECT * → fetches all columns even when you only need a few
+- No pagination → returns everything at once
+
+## Fix
+
+Add a composite index:
+```sql
+CREATE INDEX idx_notifications_lookup
+ON notifications (student_id, is_read, created_at DESC);
+```
+
+## SQL queries for each API
+
+```sql
+-- GET /api/notifications
+SELECT id, type, message, is_read, created_at
+FROM notifications
+WHERE student_id = $1
+ORDER BY created_at DESC
+LIMIT 20 OFFSET $2;
+
+-- GET /api/notifications/:id
+SELECT id, type, message, is_read, created_at
+FROM notifications WHERE id = $1 AND student_id = $2;
+
+-- PATCH /api/notifications/:id/read
+UPDATE notifications SET is_read = true
+WHERE id = $1 AND student_id = $2;
+
+-- PATCH /api/notifications/read-all
+UPDATE notifications SET is_read = true
+WHERE student_id = $1 AND is_read = false;
+
+-- GET /api/notifications/unread-count
+SELECT COUNT(*) FROM notifications
+WHERE student_id = $1 AND is_read = false;
+
+-- DELETE /api/notifications/:id
+DELETE FROM notifications WHERE id = $1 AND student_id = $2;
+```
+
+---
+
+# Stage 3
+
+## Why is the query slow?
+
+```sql
+SELECT * FROM notifications
+WHERE studentID = 1042 AND isRead = false
+ORDER BY createdAt DESC;
+```
+
+At 5M rows:
+- No index on studentID or isRead → full table scan every time
+- SELECT * → pulls all columns including full message text unnecessarily
+- No LIMIT → returns every unread notification the student has, could be hundreds
+
+## Fix
+
+Add index:
+```sql
+CREATE INDEX idx_notifications_student_read
+ON notifications (studentID, isRead, createdAt DESC);
+```
+
+Rewrite query:
+```sql
+SELECT id, type, message, isRead, createdAt
+FROM notifications
+WHERE studentID = 1042 AND isRead = false
+ORDER BY createdAt DESC
+LIMIT 20;
+```
+
+This goes from scanning 5M rows to an indexed lookup returning 20 rows.
+
+## Should we index every column?
+
+No. Every index slows down INSERT and UPDATE because all indexes need updating on every write. Only index columns you actually filter or sort by.
+
+## Find students who got a Placement in the last 7 days
+
+```sql
+SELECT DISTINCT student_id FROM notifications
+WHERE type = 'Placement'
+AND created_at >= NOW() - INTERVAL '7 days';
+```
+
+---
+
+# Stage 4
+
+## Problem
+
+Every page load hits the DB directly. With 50,000 students this causes too many simultaneous queries and the DB gets overwhelmed.
+
+## Solutions
+
+**1. Cache with Redis (best option)**
+
+Cache each student's notifications in Redis for 60 seconds. On page load check Redis first, only hit the DB on a miss.
+
+- Pros: reduces DB load by ~90%, very fast reads
+- Cons: up to 60s stale data (acceptable for notifications)
+
+**2. Pagination**
+
+Don't fetch all notifications at once, fetch 20 at a time. Should be done regardless of caching.
+
+- Pros: less data per request, faster responses
+- Cons: frontend needs to handle load more / infinite scroll
+
+**3. Read replica**
+
+Route all reads to a replica DB, keep the primary for writes only.
+
+- Pros: scales reads horizontally
+- Cons: more infrastructure, replica lag (usually milliseconds)
+
+**4. WebSocket push instead of polling**
+
+As designed in Stage 1 — server pushes new notifications, client doesn't need to fetch on every load.
+
+- Pros: eliminates polling entirely
+- Cons: persistent connections per student add server complexity
+
+## What I'd actually do
+
+Use Redis caching + pagination + WebSocket push together. Covers the problem at multiple levels without over-complicating the setup.
+
+---
+
+# Stage 5
+
+## What's wrong with the original implementation?
+
+```python
+function notify_all(student_ids, message):
+    for student_id in student_ids:
+        send_email(student_id, message)
+        save_to_db(student_id, message)
+        push_to_app(student_id, message)
+```
+
+- It's sequential — 50,000 students one at a time. At 200ms per student that's ~2.7 hours
+- No fault tolerance — when email fails for 200 students, there's no retry and no record of who failed
+- Email and DB are coupled — if the email API is slow, DB inserts wait too
+- Partial failures are invisible — no way to know which students got the email and which didn't
+
+## What to do about the 200 failed emails
+
+We need to know exactly who failed and retry just those 200. The original implementation has no per-student tracking so this is impossible. We need to fix that first.
+
+## Redesigned approach
+
+Use a message queue. Save to DB first (fast and reliable), then enqueue email and push jobs. Workers process them in parallel with automatic retries.
+
+```python
+function notify_all(student_ids, message):
+    for student_id in student_ids:
+        save_to_db(student_id, message)           # sync, always first
+        enqueue("send_email", student_id, message) # async
+        enqueue("push_to_app", student_id, message) # async
+
+# worker handles retries automatically
+function email_worker(job):
+    try:
+        send_email(job.student_id, job.message)
+    except:
+        retry(job, max_attempts=3)
+```
+
+## Should DB save and email happen together?
+
+No. DB insert is fast and local. Email depends on a third-party API that can be slow or down. Keep them separate — store the notification first so it's always visible in-app, then handle email delivery independently. If email fails, the notification still exists in the DB and can be retried without touching the DB record.
+
+---
+
+# Stage 6
+
+## How priority works
+
+Score each unread notification using type weight + recency:
+
+- Placement = 3, Result = 2, Event = 1
+- Recency uses exponential decay — halves every 24 hours
+
+```
+priorityScore = typeWeight + 0.5^(ageInHours / 24)
+```
+
+Sort by score descending, take top N.
+
+## Keeping top 10 efficient as new notifications arrive
+
+Use a min-heap of size N. When a new notification comes in, calculate its score. If it beats the lowest score in the heap, swap it in. This is O(log N) per notification instead of re-sorting everything.
